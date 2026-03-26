@@ -1,0 +1,140 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AZURE_RESOURCE_GROUP: music-analysis-rg
+  AZURE_CONTAINERAPPS_ENV: music-analysis-env
+  ACR_NAME: musicanalysisacr
+  ACR_REPOSITORY: music-analysis-aio
+  WORKLOAD_PROFILE_NAME: gpu-t4
+  WORKLOAD_PROFILE_TYPE: Consumption-GPU-NC8as-T4
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve deployment target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::12}"
+
+          if [ "${GITHUB_REF_NAME}" = "dev" ]; then
+            container_app="music-analysis-aio-dev"
+            image_tag="dev-${short_sha}"
+          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
+            container_app="music-analysis-aio"
+            image_tag="prod-${short_sha}"
+          else
+            echo "::error::Unsupported branch ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          image_ref="${ACR_NAME}.azurecr.io/${ACR_REPOSITORY}:${image_tag}"
+
+          echo "container_app=${container_app}" >> "${GITHUB_OUTPUT}"
+          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          docker system prune -af || true
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Cog
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo curl -o /usr/local/bin/cog -L "https://github.com/replicate/cog/releases/latest/download/cog_$(uname -s)_$(uname -m)"
+          sudo chmod +x /usr/local/bin/cog
+          cog --version
+
+      - name: Log in to Azure Container Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          az acr login --name "${ACR_NAME}"
+
+      - name: Build image with Cog
+        shell: bash
+        run: |
+          set -euo pipefail
+          cog build -t "${{ steps.target.outputs.image_ref }}"
+
+      - name: Push image to Azure Container Registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "${{ steps.target.outputs.image_ref }}"
+
+      - name: Deploy Azure Container App
+        env:
+          CONTAINER_APP_NAME: ${{ steps.target.outputs.container_app }}
+          CONTAINER_IMAGE: ${{ steps.target.outputs.image_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/bootstrap_azure.sh
+
+      - name: Wait for deployed OpenAPI endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fqdn="$(az containerapp show \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --name "${{ steps.target.outputs.container_app }}" \
+            --query properties.configuration.ingress.fqdn \
+            -o tsv)"
+
+          if [ -z "${fqdn}" ]; then
+            echo "::error::Failed to resolve deployed FQDN"
+            exit 1
+          fi
+
+          for attempt in $(seq 1 36); do
+            if curl -fsS "https://${fqdn}/openapi.json" >/tmp/cog-openapi.json; then
+              cat /tmp/cog-openapi.json
+              exit 0
+            fi
+
+            echo "OpenAPI check attempt ${attempt} failed; waiting for rollout"
+            sleep 10
+          done
+
+          echo "::error::Timed out waiting for https://${fqdn}/openapi.json"
+          exit 1
