@@ -30,19 +30,21 @@ Replicate version as possible.
 
 ## Manual deployment
 
-Generate the Cog Dockerfile, build the image, and create or update the target
+Build the image in Azure Container Registry, then create or update the target
 app:
 
 ```bash
-az acr login -n musicanalysisacr
-cog debug --image-name musicanalysisacr.azurecr.io/music-analysis-aio:manual-test > Dockerfile.cog
-docker build -t musicanalysisacr.azurecr.io/music-analysis-aio:manual-test -f Dockerfile.cog .
-docker push musicanalysisacr.azurecr.io/music-analysis-aio:manual-test
+az acr build \
+  --registry musicanalysisacr \
+  --image music-analysis-aio:manual-test \
+  --file Dockerfile.azure \
+  .
 
 CONTAINER_APP_NAME=music-analysis-aio-dev \
 CONTAINER_IMAGE=musicanalysisacr.azurecr.io/music-analysis-aio:manual-test \
 ./scripts/bootstrap_azure.sh
 ```
 
-The deployed Cog server should expose `POST /predictions` on port `5000`. The
-workflow polls `/openapi.json` to verify startup.
+The deployed Cog server should expose `POST /predictions` on port `5000`. This
+image build path does not generate `.cog/openapi_schema.json`, so the workflow
+verifies startup via `GET /` instead of `GET /openapi.json`.

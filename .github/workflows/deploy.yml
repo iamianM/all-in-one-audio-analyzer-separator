@@ -52,9 +52,11 @@ jobs:
           fi
 
           image_ref="${ACR_NAME}.azurecr.io/${ACR_REPOSITORY}:${image_tag}"
+          image_name="${ACR_REPOSITORY}:${image_tag}"
 
           echo "container_app=${container_app}" >> "${GITHUB_OUTPUT}"
           echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "image_name=${image_name}" >> "${GITHUB_OUTPUT}"
           echo "image_ref=${image_ref}" >> "${GITHUB_OUTPUT}"
 
       - name: Azure login
@@ -64,52 +66,15 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Free disk space
+      - name: Build image in Azure Container Registry
         shell: bash
         run: |
           set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
-          docker system prune -af || true
-          df -h
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Install Cog
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo curl -o /usr/local/bin/cog -L "https://github.com/replicate/cog/releases/latest/download/cog_$(uname -s)_$(uname -m)"
-          sudo chmod +x /usr/local/bin/cog
-          cog --version
-
-      - name: Log in to Azure Container Registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          az acr login --name "${ACR_NAME}"
-
-      - name: Generate Dockerfile from Cog
-        shell: bash
-        run: |
-          set -euo pipefail
-          cog debug --image-name "${{ steps.target.outputs.image_ref }}" > Dockerfile.cog
-
-      - name: Build image with Docker
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker build \
-            --progress=plain \
-            -t "${{ steps.target.outputs.image_ref }}" \
-            -f Dockerfile.cog \
+          az acr build \
+            --registry "${ACR_NAME}" \
+            --image "${{ steps.target.outputs.image_name }}" \
+            --file Dockerfile.azure \
             .
-
-      - name: Push image to Azure Container Registry
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker push "${{ steps.target.outputs.image_ref }}"
 
       - name: Deploy Azure Container App
         env:
@@ -120,7 +85,7 @@ jobs:
           set -euo pipefail
           ./scripts/bootstrap_azure.sh
 
-      - name: Wait for deployed OpenAPI endpoint
+      - name: Wait for deployed Cog endpoint
         shell: bash
         run: |
           set -euo pipefail
@@ -137,14 +102,14 @@ jobs:
           fi
 
           for attempt in $(seq 1 36); do
-            if curl -fsS "https://${fqdn}/openapi.json" >/tmp/cog-openapi.json; then
-              cat /tmp/cog-openapi.json
+            if curl -fsS "https://${fqdn}/" >/tmp/cog-root.json; then
+              cat /tmp/cog-root.json
               exit 0
             fi
 
-            echo "OpenAPI check attempt ${attempt} failed; waiting for rollout"
+            echo "Root endpoint check attempt ${attempt} failed; waiting for rollout"
             sleep 10
           done
 
-          echo "::error::Timed out waiting for https://${fqdn}/openapi.json"
+          echo "::error::Timed out waiting for https://${fqdn}/"
           exit 1

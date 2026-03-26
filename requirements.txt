@@ -8,6 +8,6 @@ omegaconf
 demucs
 librosa
 PyMuPDF
-git+https://github.com/CPJKU/madmom
+git+https://github.com/CPJKU/madmom@27f032e8947204902c675e5e341a3faf5dc86dae
 ninja
-audio-separator[gpu]
+audio-separator[gpu]==0.24.1
