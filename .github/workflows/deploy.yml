@@ -89,11 +89,21 @@ jobs:
           set -euo pipefail
           az acr login --name "${ACR_NAME}"
 
-      - name: Build image with Cog
+      - name: Generate Dockerfile from Cog
         shell: bash
         run: |
           set -euo pipefail
-          cog build -t "${{ steps.target.outputs.image_ref }}"
+          cog debug --image-name "${{ steps.target.outputs.image_ref }}" > Dockerfile.cog
+
+      - name: Build image with Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --progress=plain \
+            -t "${{ steps.target.outputs.image_ref }}" \
+            -f Dockerfile.cog \
+            .
 
       - name: Push image to Azure Container Registry
         shell: bash

@@ -30,11 +30,13 @@ Replicate version as possible.
 
 ## Manual deployment
 
-Build and push an image with Cog, then create or update the target app:
+Generate the Cog Dockerfile, build the image, and create or update the target
+app:
 
 ```bash
 az acr login -n musicanalysisacr
-cog build -t musicanalysisacr.azurecr.io/music-analysis-aio:manual-test
+cog debug --image-name musicanalysisacr.azurecr.io/music-analysis-aio:manual-test > Dockerfile.cog
+docker build -t musicanalysisacr.azurecr.io/music-analysis-aio:manual-test -f Dockerfile.cog .
 docker push musicanalysisacr.azurecr.io/music-analysis-aio:manual-test
 
 CONTAINER_APP_NAME=music-analysis-aio-dev \
