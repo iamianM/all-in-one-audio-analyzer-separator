@@ -1,6 +1,6 @@
 import torch
 
-from typing import List, Union
+from typing import Any, List, Union
 from tqdm import tqdm
 from .demix import demix
 from .spectrogram import extract_spectrograms
@@ -24,6 +24,7 @@ def analyze(
   visualize: Union[bool, PathLike] = False,
   sonify: Union[bool, PathLike] = False,
   model: str = 'harmonix-all',
+  preloaded_model: Any = None,
   device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
   include_activations: bool = False,
   include_embeddings: bool = False,
@@ -120,11 +121,12 @@ def analyze(
     # Extract spectrograms for the tracks that are not analyzed yet.
     spec_paths = extract_spectrograms(demix_paths, spec_dir, multiprocess)
 
-    # Load the model.
-    model = load_pretrained_model(
-      model_name=model,
-      device=device,
-    )
+    loaded_model = preloaded_model
+    if loaded_model is None:
+      loaded_model = load_pretrained_model(
+        model_name=model,
+        device=device,
+      )
 
     with torch.no_grad():
       pbar = tqdm(zip(todo_paths, spec_paths), total=len(todo_paths))
@@ -134,7 +136,7 @@ def analyze(
         result = run_inference(
           path=path,
           spec_path=spec_path,
-          model=model,
+          model=loaded_model,
           device=device,
           include_activations=include_activations,
           include_embeddings=include_embeddings,
