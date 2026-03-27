@@ -5,6 +5,8 @@ import torch
 from pathlib import Path
 from typing import List, Union
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+
 
 def demix(paths: List[Path], demix_dir: Path, device: Union[str, torch.device]):
   """Demixes the audio file into its sources."""
@@ -26,10 +28,7 @@ def demix(paths: List[Path], demix_dir: Path, device: Union[str, torch.device]):
   existing = len(paths) - len(todos)
   print(f'=> Found {existing} tracks already demixed, {len(todos)} to demix.')
 
-  static_models_dir = demix_dir.parent / 'static_models'
-  
-  # Convert to absolute path to avoid any relative path issues
-  absolute_static_models_dir = static_models_dir.resolve()
+  absolute_static_models_dir = (BASE_DIR / 'static_models').resolve()
 
   if todos:
     subprocess.run(
@@ -38,7 +37,6 @@ def demix(paths: List[Path], demix_dir: Path, device: Union[str, torch.device]):
         '--out', demix_dir.as_posix(),
         '--name', 'htdemucs',
         '--device', str(device),
-        # one folder up inside static_models
         "--repo", absolute_static_models_dir.as_posix(),
         "-n", "htdemucs", # ADDED PRECISA ter o YAML senão  n funciona: https://raw.githubusercontent.com/TRvlvr/application_data/main/filelists/download_checks.json
         *[path.as_posix() for path in todos],

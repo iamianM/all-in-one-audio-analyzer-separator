@@ -1,5 +1,6 @@
 --extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.0.1
+fastapi==0.115.12
 hydra-core>=1.1
 huggingface_hub
 tqdm
@@ -8,6 +9,8 @@ omegaconf
 demucs
 librosa
 PyMuPDF
+requests==2.32.3
+uvicorn[standard]==0.34.0
 git+https://github.com/CPJKU/madmom@27f032e8947204902c675e5e341a3faf5dc86dae
 ninja
 audio-separator[gpu]==0.24.1
