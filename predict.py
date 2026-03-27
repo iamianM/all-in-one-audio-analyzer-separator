@@ -9,6 +9,7 @@ import torch
 import allin1
 import os 
 import shutil
+from allin1.models import load_pretrained_model
 
 # ----------------------- AUDIO-SEPARATOR , DEIXEI OS EXECUTANDO PARALELAMENTE------------------------
 # import torch
@@ -43,6 +44,11 @@ class Predictor(BasePredictor):
     def setup(self):
         """Load the model into memory to make running multiple predictions efficient"""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._copy_static_models()
+        self._model_cache = {
+            "harmonix-all": load_pretrained_model(model_name="harmonix-all", device=self.device)
+        }
+        self._separator_cache = {}
 
     def predict(
         self,
@@ -87,11 +93,13 @@ class Predictor(BasePredictor):
             description="Name of the pretrained model to use: https://raw.githubusercontent.com/TRvlvr/application_data/main/filelists/download_checks.json",
             default="Kim_Vocal_2.onnx",
         ),
+        includeMdxOutputs: bool = Input(
+            description="Whether to also run the legacy MDX separator outputs.",
+            default=False,
+        ),
     ) ->  Output:
         
         output_dir = {}
-       
-        self._copy_static_models()
 
         if not music_input:
             raise ValueError("Must provide `music_input`.")
@@ -101,7 +109,7 @@ class Predictor(BasePredictor):
             if os.path.isdir(dir_name):
                 shutil.rmtree(dir_name)
 
-        if audioSeparator:
+        if audioSeparator and includeMdxOutputs:
             output_dir.update(self.run_separator(audioSeparatorModel, music_input))
 
         output_dir.update(
@@ -146,10 +154,12 @@ class Predictor(BasePredictor):
         separator_output_dir = {}
 
         # PARAMS: https://github.com/karaokenerds/python-audio-separator?tab=readme-ov-file#parameters-for-the-separator-class
-        separator = Separator(log_level=logging.INFO)
-
-        # (if unspecified, defaults to 'UVR-MDX-NET-Inst_HQ_3.onnx')
-        separator.load_model(model_name)
+        separator = self._separator_cache.get(model_name)
+        if separator is None:
+            separator = Separator(log_level=logging.INFO)
+            # (if unspecified, defaults to 'UVR-MDX-NET-Inst_HQ_3.onnx')
+            separator.load_model(model_name)
+            self._separator_cache[model_name] = separator
         stem_output_paths = separator.separate(music_input)
 
         separator_output_dir["mdx_other"] = []
@@ -176,6 +186,7 @@ class Predictor(BasePredictor):
             visualize=visualize,
             sonify=sonify,
             model=model,
+            preloaded_model=self._get_model(model),
             device=self.device,
             include_activations=include_activations,
             include_embeddings=include_embeddings,
@@ -225,3 +236,10 @@ class Predictor(BasePredictor):
                 if filename.endswith(suffix):
                     return os.path.join(dirpath, filename)
         return None
+
+    def _get_model(self, model_name: str):
+        model = self._model_cache.get(model_name)
+        if model is None:
+            model = load_pretrained_model(model_name=model_name, device=self.device)
+            self._model_cache[model_name] = model
+        return model

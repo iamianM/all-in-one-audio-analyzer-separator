@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import queue
+import select
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,7 @@ class ServiceState:
         self.queue: queue.Queue[Optional[str]] = queue.Queue()
         self.jobs: dict[str, JobRecord] = {}
         self.active_job_id: Optional[str] = None
+        self.runner_process: Optional[subprocess.Popen[str]] = None
         self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._worker_loop, name="prediction-worker", daemon=True)
         self.setup_info: dict[str, Any] = {
@@ -111,26 +113,12 @@ class ServiceState:
         self.setup_info["status"] = "running"
 
         try:
-            completed = subprocess.run(
-                [sys.executable, str(RUNNER_SCRIPT), "--setup-only"],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=SETUP_TIMEOUT_SECONDS,
-                check=False,
-            )
+            setup_logs = self._start_runner()
         except Exception:
             self.setup_info["completed_at"] = utc_now_iso()
             self.setup_info["status"] = "failed"
             self.setup_info["logs"] = traceback.format_exc()
             raise
-
-        setup_logs = completed.stdout + completed.stderr
-        if completed.returncode != 0:
-            self.setup_info["completed_at"] = utc_now_iso()
-            self.setup_info["status"] = "failed"
-            self.setup_info["logs"] = setup_logs
-            raise RuntimeError(f"Prediction runner setup failed with exit code {completed.returncode}.")
 
         self.setup_info["completed_at"] = utc_now_iso()
         self.setup_info["status"] = "succeeded"
@@ -142,6 +130,7 @@ class ServiceState:
         self.queue.put(None)
         if self.worker.is_alive():
             self.worker.join(timeout=2)
+        self._stop_runner()
 
     def create_job(self, payload: dict[str, Any]) -> JobRecord:
         if self.setup_info["status"] != "succeeded":
@@ -310,49 +299,30 @@ class ServiceState:
             "include_embeddings": bool(job.input_payload.get("include_embeddings", False)),
             "audioSeparator": bool(job.input_payload.get("audioSeparator", False)),
             "audioSeparatorModel": job.input_payload.get("audioSeparatorModel", "Kim_Vocal_2.onnx"),
+            "includeMdxOutputs": bool(job.input_payload.get("includeMdxOutputs", False)),
         }
 
-        payload_path = job.job_dir / "payload.json"
-        manifest_path = job.job_dir / "manifest.json"
         log_path = job.job_dir / "runner.log"
-        payload_path.write_text(json.dumps({**predictor_payload, "music_input": str(input_path)}))
+        request = {
+            "workspace": str(workspace),
+            "payload": {**predictor_payload, "music_input": str(input_path)},
+        }
 
         started = time.perf_counter()
         try:
-            with log_path.open("w", encoding="utf-8") as runner_log:
-                completed = subprocess.run(
-                    [
-                        sys.executable,
-                        str(RUNNER_SCRIPT),
-                        "--workspace",
-                        str(workspace),
-                        "--payload-json",
-                        str(payload_path),
-                        "--manifest-json",
-                        str(manifest_path),
-                    ],
-                    cwd=REPO_ROOT,
-                    stdout=runner_log,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    timeout=PREDICTION_TIMEOUT_SECONDS,
-                    check=False,
-                )
-        except subprocess.TimeoutExpired as exc:
+            response = self._send_runner_request(request, PREDICTION_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            self._restart_runner()
             logs = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
             raise PredictionRunnerError("Prediction timed out.", logs=logs) from exc
         predict_time = time.perf_counter() - started
 
-        logs = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-        if completed.returncode != 0:
-            raise PredictionRunnerError(
-                f"Prediction runner failed with exit code {completed.returncode}.",
-                logs=logs,
-            )
-        if not manifest_path.exists():
-            raise PredictionRunnerError("Prediction runner did not write an output manifest.", logs=logs)
+        logs = str(response.get("logs") or "")
+        log_path.write_text(logs, encoding="utf-8")
+        if not response.get("ok"):
+            raise PredictionRunnerError(str(response.get("error") or "Prediction failed."), logs=logs)
 
-        output_dict = json.loads(manifest_path.read_text()).get("output")
+        output_dict = response.get("output")
         if not isinstance(output_dict, dict):
             raise PredictionRunnerError("Prediction runner returned an invalid output manifest.", logs=logs)
         serialized_output = self._copy_output_files(output_dict, workspace, artifacts)
@@ -431,6 +401,106 @@ class ServiceState:
 
         for job in stale_jobs:
             shutil.rmtree(job.job_dir, ignore_errors=True)
+
+    def _start_runner(self) -> str:
+        self._stop_runner()
+        self.runner_process = subprocess.Popen(
+            [sys.executable, str(RUNNER_SCRIPT), "--server"],
+            cwd=REPO_ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        message, diagnostics = self._read_runner_message(SETUP_TIMEOUT_SECONDS)
+        logs = diagnostics + str(message.get("logs") or "")
+        if not message.get("ok"):
+            self._stop_runner()
+            raise RuntimeError(str(message.get("error") or "Prediction runner setup failed.") + f"\n{logs}")
+        return logs
+
+    def _stop_runner(self) -> None:
+        process = self.runner_process
+        self.runner_process = None
+        if process is None:
+            return
+        with contextlib.suppress(Exception):
+            if process.stdin:
+                process.stdin.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    def _restart_runner(self) -> None:
+        if self.stop_event.is_set():
+            self._stop_runner()
+            return
+        self._start_runner()
+
+    def _send_runner_request(self, request: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+        if self.runner_process is None or self.runner_process.poll() is not None:
+            self._start_runner()
+
+        process = self.runner_process
+        assert process is not None
+        if process.stdin is None:
+            raise PredictionRunnerError("Prediction runner stdin is unavailable.")
+
+        try:
+            process.stdin.write(json.dumps(request) + "\n")
+            process.stdin.flush()
+        except BrokenPipeError as exc:
+            self._restart_runner()
+            raise PredictionRunnerError("Prediction runner pipe broke before request dispatch.") from exc
+
+        message, diagnostics = self._read_runner_message(timeout_seconds)
+        message["logs"] = diagnostics + str(message.get("logs") or "")
+        return message
+
+    def _read_runner_message(self, timeout_seconds: int) -> tuple[dict[str, Any], str]:
+        process = self.runner_process
+        if process is None or process.stdout is None:
+            raise PredictionRunnerError("Prediction runner is not available.")
+
+        diagnostics: list[str] = []
+        deadline = time.monotonic() + timeout_seconds
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for the prediction runner.")
+
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise TimeoutError("Timed out waiting for the prediction runner.")
+
+            line = process.stdout.readline()
+            if not line:
+                raise PredictionRunnerError(
+                    f"Prediction runner exited unexpectedly with code {process.poll()}.",
+                    logs="".join(diagnostics),
+                )
+
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                diagnostics.append(line)
+                continue
+
+            if not isinstance(payload, dict):
+                diagnostics.append(line)
+                continue
+
+            return payload, "".join(diagnostics)
 
 
 state = ServiceState()
