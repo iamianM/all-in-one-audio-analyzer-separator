@@ -71,6 +71,8 @@ if az containerapp show \
     --set-env-vars \
       COG_NO_UPDATE_CHECK=1 \
       PYTHONUNBUFFERED=1 \
+      AIO_MAX_QUEUE=16 \
+      AIO_JOB_RETENTION_SECONDS=86400 \
     -o none
 else
   echo "Creating container app ${CONTAINER_APP_NAME}"
@@ -92,6 +94,8 @@ else
     --env-vars \
       COG_NO_UPDATE_CHECK=1 \
       PYTHONUNBUFFERED=1 \
+      AIO_MAX_QUEUE=16 \
+      AIO_JOB_RETENTION_SECONDS=86400 \
     -o none
 fi
 

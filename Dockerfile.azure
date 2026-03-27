@@ -31,4 +31,4 @@ EXPOSE 5000
 
 ENV COG_PREDICT_TYPE_STUB=predict.py:Predictor
 
-CMD ["python", "-m", "cog.server.http"]
+CMD ["python", "-m", "uvicorn", "service:app", "--host", "0.0.0.0", "--port", "5000", "--workers", "1", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips=*"]

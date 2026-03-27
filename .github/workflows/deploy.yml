@@ -85,7 +85,7 @@ jobs:
           set -euo pipefail
           ./scripts/bootstrap_azure.sh
 
-      - name: Wait for deployed Cog endpoint
+      - name: Wait for deployed API health
         shell: bash
         run: |
           set -euo pipefail
@@ -101,15 +101,15 @@ jobs:
             exit 1
           fi
 
-          for attempt in $(seq 1 36); do
-            if curl -fsS "https://${fqdn}/" >/tmp/cog-root.json; then
-              cat /tmp/cog-root.json
+          for attempt in $(seq 1 72); do
+            if curl -fsS "https://${fqdn}/health-check" >/tmp/service-health.json; then
+              cat /tmp/service-health.json
               exit 0
             fi
 
-            echo "Root endpoint check attempt ${attempt} failed; waiting for rollout"
+            echo "Health check attempt ${attempt} failed; waiting for rollout"
             sleep 10
           done
 
-          echo "::error::Timed out waiting for https://${fqdn}/"
+          echo "::error::Timed out waiting for https://${fqdn}/health-check"
           exit 1
